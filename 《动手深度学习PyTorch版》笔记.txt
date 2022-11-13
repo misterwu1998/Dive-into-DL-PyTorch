@@ -1,0 +1,903 @@
+import torch
+from IPython import display
+from matplotlib import pyplot as plt
+import numpy as np
+import random
+import torch.utils.data as Data
+import torch.nn
+from torch.nn import init
+import torch.optim as optim
+import torchvision
+import torchvision.transforms as transforms
+import time
+import d2lzh_pytorch as d2l
+import torch.nn.functional as F
+import zipfile
+
+
+将Tensor对象的requires_grad属性设置为True，可追踪(track)在其上的所有操作，
+	这样就可以利用链式法则进行梯度传播。
+Tensor对象.backward()：
+	完成所有梯度计算。此Tensor的梯度将累积到.grad属性中。
+	如果Tensor对象表示标量，就不用传求导变量，即缺省torch.tensor(1.0)。
+	如果Tensor对象表示张量，就传一个与Tensor对象同形的张量（点乘，加权求和，
+		变成一个标量；张量对张量求导不被允许）；也可“Tensor对象.sum()”变成标量。
+	最好在使用之前“Tensor对象.grad.data.zero_()”，把以前累积的梯度清零。
+Tensor对象.sum()：可指定哪个维度（dim参数，从0开始），且求和之后要不要保留这个维度（
+	keepdim参数）。
+Tensor对象.detach():终止追踪
+屏蔽追踪：“
+	with torch.no_grad():
+		…… #不想让Tensor对象实施追踪的代码段 
+	”
+	评估模型的时候常用。
+绕过追踪：
+	直接操纵“Tensor对象.data”，它同样是一个Tensor对象。
+Tensor对象.grad_fn：该Tensor通过什么Function计算得来；直接创建的，则None
+一个迭代周期（epoch）=完整遍历一遍data_iter函数，并对训练数据集中所有样本都来一次
+	“求损失、反向传播、更新参数”，记得清理梯度。
+迭代周期的个数也是超参数。
+Data.TensorDataset()：把若干个Tensor按顺序简单打包组合起来返回TensorDataset对象。
+一般都是以“一行”，即0号维度的1单位长度，作为一个样本，因此在最简单的线性回归模型中，
+	矩阵的一行代表了一个样本，X矩阵与权重矩阵（视为多个权重向量）相乘时，X在左。
+Data.DataLoader()：按照要求把Dataset装载进来，比如指定单批次规模batch_size、要求打乱shuffle，
+	返回可以用for循环按批次遍历的DataLoader对象。
+nn.Module算一个抽象类，可以表示神经网络中的某个层（layer），或一个包含很多层的神经网络。
+	一般应继承nn.Module，撰写自己的网络/层。
+	一个nn.Module实例应该包含：
+		一些层
+		返回输出值的前向传播forward()（闭包）
+	在__init__()中首先需要“super(当前类, self).__init__()”。
+	__call__()使得nn.Module的实现类的对象可以像函数对象一样使用，这个函数将调用forward()。
+	网络中需要的层，在__init__()中定义；一个层可以复用，也就是在forward()中两次调用该层，
+		可视作两个一模一样、参数共享的层。
+nn.Linear()：定义一层线性网络，即定义“输出列向量=参数矩阵·x列向量【+偏移列向量】”中的
+	参数矩阵的列数、输出列向量的长度，返回Linear对象。
+	各Tensor尺寸：
+		(x矩阵行数,x矩阵列数)·(参数矩阵行数,参数矩阵列数)
+		 +(1广播→输出矩阵行数,偏移向量长度)
+		=(输出矩阵行数,输出矩阵列数)
+		=(x矩阵行数,x矩阵列数)·(x矩阵列数,输出矩阵列数)
+		 +(1广播为x矩阵行数,输出矩阵列数)，
+		例如：传参20、30，得(128,20√)·(20,30)+(128,30)=(128,30√)的Tensor
+		关系：
+			x矩阵行数=输出矩阵行数
+			x矩阵列数=参数矩阵行数
+			参数矩阵列数=输出矩阵列数
+		x矩阵列数即参数in_features，因此输入矩阵x的每一行代表一个样本；
+		输出矩阵列数即参数out_features，因此输出矩阵的每一行对应一个样本。
+		对于更高维度的Tensor，其实就是把x矩阵的行扩张成多个维度。
+	PyTorch在初始化线性回归层的时候会自动将其中的参数初始化，
+		不用像“从零开始实现”那样手动初始化所有参数。
+nn.Sigmoid()：返回一个sigmoid层。本来sigmoid运算一般是融合在某一层中的，PyTorch将其独立出来。
+nn.Sequential()：依次传入各层nn.Module对象，返回Sequential对象。
+	也可以先空置，之后才调用其add_module()添加层。
+	还可以先构造Python自带的collections.OrderedDict对象（这样可以给各层起名），然后传入。
+	Sequential对象可以像数组一样通过[]直接访问子模块。
+	适合用于：模型的前向计算为简单串联各个层的计算。
+nn.Module对象.parameters()：可用for循环遍历的generator，查看可以“学习”的参数们。
+	参数对象属于nn.Parameter类，nn.Parameter是torch.Tensor的子类，
+		如果在__init__()中添加了一个nn.Parameter类的成员变量，
+		PyTorch会将其视为当前Module的参数。
+	也可以在__init__()中定义一个nn.ParameterList类的成员变量，
+		为当前模型一次性加入多个Parameter。
+		类似的有nn.ParameterDict类，像字典一样使用。
+nn.Module对象.named_parameters()：和parameters()类似，用tuple捆起每个参数及其名字。
+	如果Module有多层，PyTorch给返回的名字自动加上层数的索引作为前缀。
+nn.Module对象.state_dict()：返回一个字典，键是Module中参数的名（如果有子层，
+	用“子层名.子层的参数”表示），值就是参数的Tensor对象。
+	只有具有可学习参数的层(卷积层、线性层等)才有state_dict中的条目。
+init.normal_()：将权重参数每个元素初始化为随机采样于均值为mean、标准差为std的正态分布，
+init.constant_()：偏差参数bias初始化。
+损失函数可看作是一种特殊的层，比如nn.MSELoss()返回的MSELoss函数对象。
+在一个batch上，不管是要求求和还是要求平均, nn.MSELoss层 的output都会保留样本维度，形状为(1,).
+	（[2020年12月3日]依据: GitHub/WaveletSRNet/main.py 中的“psnr = 10 * log10(1 / (mse.data[0]) )”）
+优化算法的功能：最小化损失值，减小训练误差。
+optim包中预定义很多优化算法的类，比如optim.SGD()返回SGD对象。
+	optim.SGD()可对不同的子网进行不同的设置，例如：“
+		optimizer =optim.SGD([
+				# 用“{}”括起来的应该是一个字典，作为**kwargs参数
+                # 如果对某个参数不指定学习率，就使用最外层的默认学习率
+                {'params': net.subnet1.parameters()}, # lr=0.03
+                {'params': net.subnet2.parameters(), 'lr': 0.01}
+            ], lr=0.03)
+		”
+	weight_decay是L_2惩罚项中的超参数。
+优化算法对象.zero_grad()：（损失结果.backward()之前，）将要“学习”的参数的梯度清零。
+优化算法对象.step()：（损失结果.backward()之后，）进行一步优化。
+torchvision.datasets.预置数据集名称()：下载预置数据集中的训练集或测试集（取决于参数train）。
+	可指定参数transform = transforms.ToTensor()使所有数据转换为torch.float32型Tensor，
+	取值范围是[0.,1.)；尺寸转为(通道数,高度,宽度)。
+	返回的训练集或测试集能通过[]访问指定样本，如“feature, label = mnist_train[0]”。
+Tensor对象.exp()：返回逐个元素进行自然指数运算后的Tensor对象
+torch.gather()：在指定的维度（dim参数）上“听从”index Tensor对象，从input拣元素。
+	以矩阵input、dim=1（列的维度）为例，假设：input[100][200]=666 ，index[100][300]=200 ，
+	那么out[100][300]=666 ，因为：“index[100][300]=1 ”告诉该函数：
+		1.在out的第 100 行中，第 300 列要从input的第 200 行拣元素过来
+		2.在其余维度上不走动，也就是在input的第 100 行中拣
+	该函数可用于交叉熵的计算，以二维的y_hat（一行中各列代表一个样本属于各类的概率，
+		一行中各列之和为1）作为input，指定dim=1（列的维度），
+		index为(样本个数,1)的Tensor对象——即各样本所属的分类labels“正确答案”。
+		所得out为(样本个数,1)的Tensor对象，各行上的唯一一列的数值是这个样本
+		属于“正确答案”所指类别的预测概率，也就是模型认为这个样本有多大概率属于
+		本就应该属于的那一类，这个概率越大表示模型越精准。
+		最后，交叉熵等于-out.log()。
+Tensor对象.scatter() 与 torch.gather() 原理类似，区别在于，
+	“听从”index所做的事不是从input中挑拣元素，而是在self（即output）中选位置填。
+torch.argmax()：找出最大元素的索引值。如果有多个维度且没有指定dim参数，
+	就取首个维度上的索引（？是其它维度上全部求和拿来比较找最大，还是逐个元素拿来比较？）
+Tensor对象.float()：把数据类型转成浮点型。
+	如果原本是布尔型Tensor，比如由“Tensor对象a==Tensor对象b”语句生成（逐一比较）的，
+	那么True转为1.，False转为0.，“布尔→浮点”还能用于产生“掩码”，用于手动实现抓爆。
+Tensor对象.item()：返回Python原生数据类型的数据，要求Tensor对象只有一个元素，
+	与此不同的是，Tensor对象.data仍然是Tensor对象。
+nn.CrossEntropyLoss()：啥也不传，能返回一个包括softmax运算和交叉熵损失计算的函数对象。
+	损失值=该函数返回的函数对象(
+		(样本个数,类别个数)的预测值Tensor对象,
+		(样本个数,1)的“正确答案”Tensor对象
+		)，然后可以“损失值.backward()”
+torch.matmul()：比torch.mm()更厉害，能自动给维度不足的那个Tensor进行“广播”，然后才相乘。
+	具体什么情况叫做“维度不足”，见API。
+泛化误差（generalization error）：模型在任意一个测试数据样本上表现出的误差的期望，
+	常通过测试数据集上的误差来近似。
+验证数据集：在训练数据集和测试数据集以外预留用于模型选择的一部分数据，
+	简称验证集（validation set）。
+K折交叉验证：把原始训练数据集分割成K个不重合的子数据集，做K次模型训练和验证。
+	每一次使用一个子数据集验证模型，使用其他K−1个子数据集来训练模型。
+欠拟合现象（underfitting）：模型无法得到较低的训练误差。
+过拟合（overfitting）：模型的训练误差远小于它在测试数据集上的误差。
+	训练数据集中样本数过少，特别是比模型参数数量（按元素计）更少时，过拟合更容易发生。
+torch.cat()：级联多个Tensor，可以指定维度，级联之后输出的Tensor在指定的维度上长度增加。
+torch.pow()：求exponent次幂。
+L_2范数惩罚项——模型权重参数每个元素的平方和与一个非负数的乘积。
+	这个非负数是超参数，设为零就是屏蔽惩罚项。
+	为了实现权重衰减，损失函数需要加入这个惩罚项。
+	有时候不仅惩罚权重参数，还惩罚偏移参数。
+	可以在创建优化算法对象的时候对权重参数、偏移参数分开处理、各自优化，
+		指定weight_decay参数加入惩罚。
+Tensor对象.norm()：求范数，默认对矩阵求Frobenius范数、对向量求L_2范数。
+丢弃法（Dropout，抓爆）也是用来解决过拟合问题的。当对某层使用丢弃法时，
+	该层的每个单元将有一定概率被丢弃掉。设丢弃概率为p，那么i号单元有p的概率会被清零，
+	有1−p的概率会除以1−p做放大。丢弃概率是丢弃法的超参数。
+	在测试模型时一般不使用丢弃法。
+nn.Dropout()：指定抓爆概率，返回一个抓爆层。此后如果要测试模型，暂时不想抓爆，
+	需要“模型对象.eval()”
+nn.ModuleList、nn.ModuleDict仅仅是存放了一些模块的字典，
+	并没有像nn.Sequential类那样定义forward()。
+调用一个自定义的模型进行前向传播时，指定Parameter名（要求此模型类在加入这个Parameter时
+	采用的是“字典”nn.ParameterDict类）可专门使用该Parameter中的Tensor进行“局部”前向传播。
+PyTorch将对象序列化并保存到磁盘，后台用的是Python的Pickle，保存的文件名后缀“.pt”。
+保存和加载模型：
+	仅保存参数（推荐）：
+		保存：“torch.save(模型对象.state_dict(), 文件名) # 推荐的文件后缀名是pt或pth”
+		加载：“
+			model=类名(……)
+			model.load_state_dict(torch.load(文件名))”
+	保存整个模型的话，直接保存、加载“模型对象”即可。
+torch.cuda.is_available()：GPU可以用吗？
+torch.cuda.device_count()：有几个GPU？
+torch.cuda.current_device()：当前是GPU的索引（从零开始）？
+torch.cuda.get_device_name()：传索引号，返回GPU的名字。
+Tensor对象.cuda()：把这个Tensor对象放到GPU上，可以传索引号以指定GPU。
+Tensor对象.device：在哪个设备上？
+存储在不同设备上的数据不可以同时用于计算。
+nn.Module对象.cuda()：把整个模型搬到GPU上。
+	此时如果想“调用”该模型，需要让输入Tensor也在GPU上。
+Tensor对象.fill_()：给整个Tensor对象所有元素赋一个值。可用于梯度清零。
+特征图（feature map）：二维卷积层输出的二维数组可以看作是输入在空间维度（宽和高）上某一级的表征。
+（元素x的）感受野（receptive field）：
+	在输入矩阵中，可能通过前向计算影响元素x的全部区域（可能大于输入的实际尺寸）。
+常使用“元素”一词来描述数组或矩阵中的成员。在神经网络的术语中，这些元素也可称为“单元”。
+多输入通道、单输出通道的情况下（通道维度是第0维度），输入数组的每个通道上都是二维的数组，
+	因此一个通道需要一个核数组（二维），再把这些核数组捆起来，形状就是(通道数,核高度,核宽度)。
+	每个输入通道完成相应的卷积运算（互相关运算）后，将各二维输出数组按元素求和，
+	坍缩输入通道维度，得到一个二维数组。
+多输入通道、多输出通道的情况下，每个输出通道需要一个形状为(输入通道数,核高度,核宽度)的卷积核，
+	完成一次“多输入通道、单输出通道”的卷积运算，得到一个二维数组。
+	有多个输出通道，所以需要形状为(输出通道数,输入通道数,核高度,核宽度)的卷积核。
+	输出要求多通道，所以不坍缩输出通道维度，输出数组的形状是(输出通道数,输出数组高度,输出数组宽度)。
+二维池化层如nn.MaxPool2d、nn.AvgPool2d，在多输入通道的情况下输出通道数等于输入通道数。
+	每个输入通道需要一个二维的池化窗口，捆起来形成(输入通道数,高度,宽度)的池化窗口。
+nn.MaxPool2d层,nn.Conv2d层的输出的高度或宽度
+	=下取整(
+		(输入的高度或宽度-1+2*padding[·]-dilation[·]*(kernel_size[·]-1))/stride[·] + 1
+	)。
+	其中dilation、stride的缺省值为(1,1)，padding的缺省值为(0,0)。
+nn.Conv2d()的groups参数表示要把input在通道维度上分成几group, 
+	分了group之后，每个group利用各自的卷积核（卷积核也被分成groups份）进行卷积，
+	在通道维度上将各group的卷积结果concat()起来，得到期望的大小为out_channels的通道维度。
+nn.AvgPool2d层的输出的高度或宽度
+	=下取整(
+		(输入的高度或宽度+2*padding[·]-kernel_size[·])/stride[·] + 1
+	)。
+卷积神经网络（LeNet）：
+	卷积层块：
+		基本单位是卷积层+最大池化层，重复堆叠构成卷积层块。
+	全连接层块：
+		摊平每个样本使输入数组的形状变为(样本个数,样本向量长度=通道数*高度*宽度)，
+		然后若干次全连接+Sigmoid，最后的输出形状为(样本个数,类别个数)。
+深度卷积神经网络（AlexNet）用ReLU代替Sigmoid。
+VGG块：连续使用数个填充量1、窗口形状(3,3)的卷积层，然后接一个步幅2、窗口形状(2,2)的最大池化层。
+	可指定卷积层连续使用的个数、输入通道数、输出通道数。
+与AlexNet和LeNet一样，VGG网络由卷积层模块后接全连接层模块构成。
+	卷积层模块：数个VGG块的串联。
+	全连接层块和AlexNet相似。
+NiN块使用1×1卷积层来替代全连接层，即卷积核的形状是(类别个数,输入通道数,1,1)。
+NiN模型将容易造成过拟合的全连接输出层替换成输出通道数等于标签类别数的NiN块+全局平均池化层。
+Inception块分四条并行线路，各自需要给定1或2个超参数输出通道数。
+GoogLeNet模型中的Inception块的各并行线路的输出通道数之比（见原文）由大量实验得来。
+标准化处理使任意一个特征在数据集中所有样本上的均值为0、标准差为1，
+	各个特征的分布相近，有利于训练出有效的模型。实质就是按元素进行拉伸、偏移。
+	批量归一化也是一个Layer。
+		用于全连接层：通常插在Linear层、激活函数层之间。
+			nn.BatchNorm1d()。
+		用于卷积层：通常插在卷积计算之后、激活函数之前。
+			如果卷积计算输出多个通道，需要对这些通道分别做批量归一化，
+			每个通道都拥有独立的拉伸和偏移参数，并均为标量。
+			nn.BatchNorm2d()。
+	使用批量归一化训练时，可将批量大小设得大一点，使批量内样本的均值和方差的计算都较为准确。
+	通过移动平均估算整个训练数据集的样本均值和方差，并在预测时使用它们，
+		因为测试时不宜“偏爱”某个批量，应该用上所有样本。
+nn.BatchNorm1d层要求输入是(样本数目,通道数目,长度)或(样本数目,长度)的Tensor，
+	参数num_features取通道数目或长度，即输入Tensor第1维的值。
+	输出的形状与输入相同。
+nn.BatchNorm2d层要求输入是(样本数目,通道数目,高度,宽度)的Tensor，
+	参数num_features取通道数目，即输入Tensor第1维的值
+	输出的形状与输入相同。
+残差块（residual block）：不是去学习出函数f(输入数组)，而是学残差函数g(输入数组)=
+	(f(输入数组)-输入数组)，然后让输入数组跨过g()，和g(输入数组)求和，
+	得到f(输入数组)，传给激活函数。
+ResNet沿用了VGG全3×3卷积层的设计。残差块里首先有2个输出通道数相等的3×3卷积层。
+	每个卷积层后接一个批量归一化层和ReLU激活函数。然后将输入跳过这两个卷积运算，
+	直接加在最后的ReLU激活函数前。要求两个卷积层的输出与输入形状一样，从而可以相加。
+	如果想改变通道数，就额外引入一个1×1卷积层将输入变换成需要的形状后再相加。
+ResNet模型具体结构见原文。
+DenseNet与残差块在结构上的区别：输入数组跨过g()后，和g(输入数组)在通道维上联结、堆叠。
+	主要构建模块：
+		稠密块（dense block）：
+			定义输入和输出是如何联结的。
+			在其中定义若干个特别的卷积块，它们的输入和卷积层输出再通道维上联结，
+				卷积层的输出通道数是超参数。
+		过渡层（transition layer）：
+			加入卷积层，控制控制通道数，使之不至于过大。
+			加入平均池化层，减小高度、宽度。
+DenseNet模型具体结构见原文。
+语言模型中，（w_n表示n号单词）条件概率p(w_2|w_1)=p(w_1,w_2)/p(w_1)
+	=(f(w_1,w_2)/训练集的总词频)/(f(w_1)/训练集的总词频)
+	=f(w_1,w_2)/f(w_1)=w_1与w_2相邻出现的频率/w_1出现的频率。
+n元语法（n-grams）：一个词的出现只与前面n-1个词相关，即n-1阶马尔可夫链（Markov chain of order n）。
+循环神经网络常用的定义方式：“改造”隐藏层的计算函数，
+	原本不含隐藏状态时，隐藏层的输出=激活函数(输入·权重+偏移)。
+	加入隐藏状态，隐藏层本次输出=激活函数(输入·本次的权重+隐藏层上次输出·上次的权重+偏移)，
+	所谓隐藏状态就是隐藏层上次输出。
+	后面的输出层不变。
+裁剪梯度（clip gradient）：把所有参数梯度的元素拼接成一个向量g，并设裁剪的阈值是θ。
+	裁剪后的梯度=min(θ/g的L2范数,1)*g，裁剪后的梯度的L2范数小于等于θ。
+	∂损失/∂时间步t时的隐藏状态=
+		for i in [t,t+1,…,最后时间步T]:
+			∑((W_hh的转置)**(T-i) * W_qh的转置 * ∂损失/∂时间步T＋t－i时网络的输出)。
+	其中 W_qh 用于与 时间步t时的隐藏状态 相乘后送入 激活函数 求 时间步T＋t－i处网络的输出，
+	W_hh 用于与 时间步t－1时的隐藏状态 相乘后与其它项相加求 时间步t时的隐藏状态 ，
+	具体公示见6.6章。
+	当总的时间步数T较大或者当前时间步t较小时，循环神经网络的梯度较容易出现衰减或爆炸。
+	裁剪梯度能应对梯度爆炸，但无法解决梯度衰减的问题。
+困惑度（perplexity）：交叉熵损失函数做指数运算所得的值。
+torch.unsqueeze()：反“坍缩”，凭空插入dim指定的一个维度
+nn.Module对象.named_children()：构造一个迭代器，遍历模型的一级子模块（不关心子模块的子模块），
+	每次返回一个tuple，依次包含子模块的名字、子模块本身。
+nn.Module对象.name_modules()：构造一个迭代器，遍历模型的全体子模块（包括子模块的子模块），
+	每次返回一个tuple，依次包含子模块的名字、子模块本身。
+nn.RNN层:
+	允许两个输入Tensor:input,h_0 。
+	input:
+		形状(序列长度,样本数目,input_size)
+	h_0:
+		形状(num_layers * num_directions, 样本数目, hidden_size)。
+		隐藏层的初始状态，第1维表明该Tensor应用于 input 整个批量的每个样本。
+		可缺省。
+		num_directions:方向数目，取决于定义该层时的bidirectional参数，指定为 True 的话，
+			num_directions==2 ；（默认）指定为 False 的话， num_directions==1 。
+	对应有两个输出Tensor:output,h_n 。
+	output:
+		形状(序列长度, 样本数目, num_directions * hidden_size)。
+		The output features h_t (at time t) from the last layer of the RNN.
+		可以通过“ output.view(seq_len, batch, num_directions, hidden_size) ”拆分，
+		拆后第2维上，[0],[1]分别表示前向、后向。
+	h_n:
+		形状(num_layers * num_directions, batch, hidden_size)。
+		Tensor containing the hidden state at time t = seq_len.
+		类似的拆分：“ h_n.view(num_layers, num_directions, batch, hidden_size) ”。
+Tensor对象.contiguous():
+	一个Tensor对象经过某些关于形状的操作之后，逻辑上应当相邻的两个元素有可能不在一起了。
+	例如就地交换[
+		[1,2],
+		[3,4]
+		]的两个维度，逻辑上，矩阵变成了[
+		[1,3],
+		[2,4]
+		], 但物理上，“2”并没有紧随在“3”之后，还是想原来那样，“3”在“2”之后。
+	在这种情况下，Tensor对象不能view().
+	contiguous()使各元素之间物理上的顺序与逻辑上的顺序达到一致。
+门控循环神经网络（gated recurrent neural network）：
+	为了更好地捕捉时间序列中时间步距离较大的依赖关系，通过可以学习的门来控制信息的流动。
+门控循环单元（gated recurrent unit，GRU）：一种常用的门控循环神经网络。
+	引入了重置门（reset gate）和更新门（update gate），输入均为当前时间步输入 X_t 、
+	上一时间步隐藏状态 H_t－1 ，输出由激活函数为sigmoid函数的全连接层计算得到，
+	而sigmoid函数使输出的值域变换到(0,1)。
+	时间步t时的候选隐藏状态H_t_ = tanh(X_t*W_xh + 按元素相乘(R_t,H_t－1) * W_hh + b_h)。
+	时间步t时的隐藏状态H_t = 按元素相乘(Z_t,H_t－1)+按元素相乘((1-Z_t),H_t_)。
+	X_t:时间步t时网络的输入。
+	W_xh:用于与 X_t 相乘求 H_t_ 的权重。
+	R_t:时间步t时重置门的输出。
+	H_t－1:时间步t－1时的隐藏状态（不是候选的）。
+	W_hh:与旧隐藏状态有关的权重。
+	b_h:偏移量。
+	Z_t:时间步t时更新门的输出。
+	重置门有助于捕捉时间序列里短期的依赖关系。
+	更新门有助于捕捉时间序列里长期的依赖关系。
+	nn.GRU():构造一个GRU层。
+长短期记忆（long short-term memory，LSTM）：一种常用的门控循环神经网络。
+	引入了输入门（input gate）、遗忘门（forget gate）、输出门（output gate）、
+	与隐藏状态同形状的记忆细胞，以控制信息的流动。
+	时间步t时输入门的输出I_t = 激活函数( X_t * W_xi + H_t－1 * W_hi + b_i )。
+	时间步t时遗忘门的输出F_t = 激活函数( X_t * W_xf + H_t－1 * W_hf + b_f )。
+	时间步t时输出门的输出O_t = 激活函数( X_t * W_xo + H_t－1 * W_ho + b_o )。
+	时间步t时候选记忆细胞的状态C_t_ = tanh( X_t * W_xc + H_t－1 * W_hc + b_c )；
+		值域(-1,1)。
+	时间步t时记忆细胞的状态C_t=按元素相乘(F_t,C_t－1)+按元素相乘(I_t,C_t_)。
+	时间步t时的隐藏状态H_t=按元素相乘(O_t,tanh(C_t))。
+	各变量的命名规则与GRU中介绍的类似。
+深度循环神经网络：不止1个隐藏层，隐藏状态的信息不断传递至当前层的下一时间步和当前时间步的下一层。
+	H_t_l=激活函数(H_t_[l-1] * W_xh_l + H_[t-1]_l * W_hh_l + b_h)。
+	H_t_l:时间步t时第l隐藏层的状态。
+双向循环神经网络：
+	解决的问题：比如写一个句子时，可能需要根据句子后面的词来修改句子前面的用词。
+	H_t_forward=激活函数(X_t*W_xh_forward + H_[t-1]_forward * W_hh_forward + b_h_forward)。
+	H_t_backward=激活函数(
+		X_t*W_xh_backward + H_[t+1]_backward * W_hh_backward + b_h_backward
+	)。
+目标函数通常是训练数据集的全体或者一个batch中有关各个样本的损失函数的平均。
+	因此训练数据样本数很大时，梯度下降每次迭代的计算开销很高。
+	随机梯度下降将随机均匀采样的一个样本来计算梯度、迭代。
+小批量随机梯度下降：
+	若 批量大小=1 ，该算法为随机梯度下降；若 批量大小=训练数据样本数 ，该算法为梯度下降。
+	基于随机采样得到的梯度的方差在迭代过程中无法减小(?)，因此在实际中，
+	（小批量）随机梯度下降的学习率应当在迭代过程中自我衰减。
+	而梯度下降在迭代过程中一直使用目标函数的真实梯度(?)，无须自我衰减学习率。
+动量法在每个时间步的自变量更新量 ≈ 
+	将最近1/(1−γ)个时间步的普通更新量“学习率*梯度”做了“指数加权移动平均”后再除以1−γ。
+	简单概括：每一步的更新都保留最近1/(1-γ)步的“惯性”。
+	没有独立的动量法优化算法，只能像学习率那样指定超参数'momentum'。
+AdaGrad:
+	s[t] = s[t-1] + 按元素相乘(g[t], g[t]),
+	x[t] = x[t-1] - 按元素相乘(η/(s[t] + ϵ)**0.5, g[t]),
+	s[t]:数组，时间步t时的累加变量。
+	x[t]:学习的参数数组。
+	η:学习率。
+	ϵ:维持数值稳定性而添加的小常数，如10**(-6)。
+	g[t]:数组，时间步t时的小批量梯度。
+	x[t]的迭代式中“按元素相乘()”使x[t]中的每个元素有自己专属的实际学习率。
+	显然 x[t] <= x[t-1]，到后期，实际学习率可能会太小，以至于“学不动”。
+RMSProp:
+	在 AdaGrad 的基础上改进 s[t] 的迭代式：
+	s[t] = γ * s[t-1] + (1-γ) * 按元素相乘(g[t], g[t]),
+	γ:超参数，作用是把截至时间步t的所有小批量随机梯度g[t]进行“指数加权移动平均”，然后才赋给 s[t]。
+	到后期能比 AdaGrad 更快逼近最优解。
+	optim.RMSProp()构造该优化算法对象；γ通过'alpha'指定。
+AdaDelta:
+	基于 AdaGrad 的另一种改进。
+	没有学习率这个超参数，被 (Δx[t-1])**0.5 取代了。
+	s[t] = ρ * s[t-1] + (1-ρ) * 按元素相乘(g[t], g[t]),
+	x[t] = x[t-1] - 按元素相乘(((Δx[t-1] + ϵ)/(s[t] + ϵ))**0.5, g[t]),
+	Δx[t] = ρ * Δx[t] + (1-ρ) * 按元素相乘(
+		按元素相乘(((Δx[t-1] + ϵ)/(s[t] + ϵ))**0.5, g[t]),
+		按元素相乘(((Δx[t-1] + ϵ)/(s[t] + ϵ))**0.5, g[t])),
+	ρ:对应于 RMSProp 中的 γ 。
+	Δx[t]:数组，额外的状态变量 。
+	ϵ:维持数值稳定性而添加的小常数，如10**(-5)。
+	s[0], Δx[0] 的所有元素会被初始化为0。
+	optim.Adadelta()构造该优化算法对象；ρ通过'rho'指定。
+Adam:
+	在 RMSProp 的基础上改进，可看作RMSProp算法与动量法的结合。
+	v[t] = B_1 * v[t-1] +(1-B_1) * g[t],
+	类似于 RMSProp ，s[t] = B_2 * s[t-1] + (1-B_2) * 按元素相乘(g[t], g[t]),
+	v[t]:数组，表示动量。
+	B_1, B_2:超参数，算法作者建议分别设为0.9, 0.999。
+	v[0] 中所有元素初始化为0。
+	可得 v[t] = (1-B_1)*(
+		for i in [1,2,3,…,t]:
+			∑(B_1**(t-i) * g[i])),
+	“抽取”出权值之和 (1-B_1)*(
+		for i in [1,2,3,…,t]:
+			∑(B_1**(t-i))) = 1 - B_1**t, t较小时权值之和太小，从而 v[t] 也太小，
+	因此进行修正:v_[t] = v[t] / (1 - B_1**t),
+	相应地:s_[t] = s[t] / (1 - B_2**t).
+	修正后各时间步上的权值之和为1。
+	x[t] = x[t-1] - η * v_[t] / (s_[t] ** 0.5 + ϵ),
+	ϵ:为了维持数值稳定性而添加的常数，如10**(-8).
+	optim.Adam()构造该优化算法对象。
+符号式编程：把脚本内容（函数和普通语句都行）用引号括起来，以字符串形式返回。
+	要使用这些“函数”的时候，把它们返回的字符串拼接起来，交给 compile(),
+	生成一个可执行的过程。
+torch.cuda.synchronize():
+	如果在多个device上存入了Tensor并且有计算任务，该函数将强制等待所有任务都搞定，然后才往下走。
+torch.DataParallel():把一个 nn.Module对象 打包成允许使用多GPU进行计算的对象。
+	注意，打包后的 DataParallel对象 与原来的 Module对象 具有不同的结构，
+	如果通过 torch.save()保存了打包后的 DataParallel对象 ，那么加载回来的时候，
+	也得加载到一个 DataParallel对象 上。
+图像增广: Image Augmentation.
+	通常只将图像增广应用在训练样本上，而不在预测时使用含随机操作的图像增广。
+transforms.RandomHorizontalFlip():构造一个图像随机水平翻转器；用法：函数对象。
+transforms.RandomVerticalFlip():构造一个图像随机垂直翻转器；用法：函数对象。
+transforms.RandomResizedCrop():构造一个图像随机裁剪器；用法：函数对象。
+	size:tuple,裁剪后缩放的高度和宽度。
+	scale:tuple,含两个元素，分别表示新图像至少、至多从原图像选几倍面积的区域，
+		取值范围当然是(0.0,1.0].
+	ratio:从原图像框选区域时，(宽度/高度)允许的最小值、最大值。
+transforms.ColorJitter():构造一个图像颜色随机抖动器。
+	brightness:亮度。
+	contrast:对比度。
+	saturation:饱和度。
+	hue:色调。
+	这几个参数都允许浮点数（表示与原值的偏差量）或者含两个浮点数（表示抖动后的范围）的tuple。
+transforms.Compose():组合多个Transform子类对象。
+transforms.ToTensor 也是一个Transform子类。
+迁移学习（transfer learning）:从源数据集学知识，迁移到目标数据集上
+微调（fine tuning）:
+	1.在源数据集（如包含了海量数据的ImageNet数据集）上预训练一个神经网络模型，即源模型。
+	2.创建一个新的神经网络模型，即目标模型，沿用源模型上除了输出层外的所有结构、参数。
+	3.为目标模型添加一个输出大小为目标数据集类别个数的输出层，并随机初始化该层的模型参数。
+	4.利用目标数据集（如“椅子”数据集）训练目标模型。输出层从头训练，其余层的参数基于源模型的参数微调。
+torchvision.models包 提供了常用的预训练模型。
+使用预训练模型时，不管是用于训练还是训练完用于预测，一定要对数据进行预训练时的预处理。
+	torchvision.models包 中的预训练模型要求:
+		All pre-trained models expect input images normalized in the same way, 
+		i.e. mini-batches of 3-channel RGB images of shape (3 x H x W), 
+		where H and W are expected to be at least 224. 
+		The images have to be loaded in to a range of [0, 1] and then 
+		normalized using mean = [0.485, 0.456, 0.406] and std = [0.229, 0.224, 0.225]. 
+	至于 pretrained-models.pytorch仓库 中的预训练模型，参见其README。
+torchvision.models.resnet18():构造一个ResNet-18模型；
+	指定 pretrained=True, 可以下载并加载预训练的模型参数。
+	该模型的全连接层是 模型名.fc, 其它模型不一定有这个成员变量，建议看源码。
+	把 模型名.fc 换成自己想要的全连接层。
+锚框（anchor box）:以某个像素为中心生成多个大小和宽高比（aspect ratio）不同的边界框。
+	设输入图像高为 h, 宽为 w, 大小 s, 0<s<=1, 宽高比 r>0，
+	锚框的宽=w*s * r**0.5, 锚框的高=h*s / r**0.5.
+	设定一组大小:{s[1], s[2], …, s[n]}, 一组宽高比:{r[1], r[2], …, r[m]},
+	为了降低复杂度，只关心 s[1], r[1] 相关的锚框:{
+		(s[1], r[1]),
+		(s[1], r[2]), (s[1], r[3]), …, (s[1], r[m]),
+		(s[2], r[1]), (s[3], r[1]), …, (s[n], r[1])},
+	图像中有 w*h 个像素，因此共生成 w*h * (n+m-1) 个锚框。
+
+复用代码：
+	d2lzh_pytorch包：“
+		def use_svg_display():
+			# 用矢量图显示
+			display.set_matplotlib_formats('svg')
+
+		def set_figsize(figsize=(3.5, 2.5)):
+			use_svg_display()
+			# 设置图的尺寸
+			plt.rcParams['figure.figsize'] = figsize
+		
+		def data_iter(batch_size, features, labels):
+			'''
+			每次返回batch_size（批量大小）个随机样本的特征和标签
+			是个generator
+			'''
+			num_examples = len(features)
+			indices = list(range(num_examples))
+			random.shuffle(indices)  # 样本的读取顺序是随机的
+			for i in range(0, num_examples, batch_size):
+				j = torch.LongTensor(indices[i: min(i + batch_size, num_examples)]) # 最后一次可能不足一个batch
+				yield  features.index_select(0, j), labels.index_select(0, j) 
+		
+		def linreg(X, w, b):  # 计算线性回归
+			return torch.mm(X, w) + b
+			
+		def squared_loss(y_hat, y):  #损失函数
+			# 注意这里返回的是向量, 另外, pytorch里的MSELoss并没有除以 2
+			return (y_hat - y.view(y_hat.size())) ** 2 / 2
+		
+		def sgd(params, lr, batch_size):  # 本函数已保存在d2lzh_pytorch包中方便以后使用	
+			'''
+			优化算法；迭代模型参数
+			params是要‘学习’的参数，如w向量,b
+			lr是学习率超参数；该函数把lr“平摊”到batch的各样本上去
+			'''
+			for param in params:
+				param.data -= lr * param.grad / batch_size # 注意这里更改param时用的param.data
+		
+		def get_fashion_mnist_labels(labels):
+			'''
+			传入各样本的label数字，
+			返回fashion_mnist数据集的各label文本的list
+			'''
+			text_labels = ['t-shirt', 'trouser', 'pullover', 'dress', 'coat',
+						   'sandal', 'shirt', 'sneaker', 'bag', 'ankle boot']
+			return [text_labels[int(i)] for i in labels]
+			
+		def show_fashion_mnist(images, labels):
+			'''
+			传入各图片Tensor,各label文本，
+			画出多张图像和对应标签
+			'''
+			d2l.use_svg_display()
+			# 这里的_表示我们忽略（不使用）的变量
+			_, figs = plt.subplots(1, len(images), figsize=(12, 12))
+			for f, img, lbl in zip(figs, images, labels):
+				f.imshow(img.view((28, 28)).numpy())
+				f.set_title(lbl)
+				f.axes.get_xaxis().set_visible(False)
+				f.axes.get_yaxis().set_visible(False)
+			plt.show()
+			
+		#def load_data_fashion_mnist():
+		def load_data_fashion_mnist(batch_size, resize=None, root='~/Datasets/FashionMNIST'):
+			'''
+			完整实现。
+			Download the fashion mnist dataset and then load into memory.
+			'''
+			trans = []
+			if resize:
+				trans.append(torchvision.transforms.Resize(size=resize))
+			trans.append(torchvision.transforms.ToTensor())
+
+			transform = torchvision.transforms.Compose(trans)
+			mnist_train = torchvision.datasets.FashionMNIST(root=root, train=True, download=True, transform=transform)
+			mnist_test = torchvision.datasets.FashionMNIST(root=root, train=False, download=True, transform=transform)
+
+			train_iter = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, shuffle=True, num_workers=4)
+			test_iter = torch.utils.data.DataLoader(mnist_test, batch_size=batch_size, shuffle=False, num_workers=4)
+
+			return train_iter, test_iter
+
+		#def evaluate_accuracy(data_iter, net):
+		def evaluate_accuracy(data_iter, net, device=None):
+			# 改用GPU来加速计算，完事后data_iter中的数据留在GPU，计算结果在CPU
+
+			# 该函数将被逐步改进：它的完整实现将在“图像增广”一节中描述
+		
+			#acc_sum, n = 0.0, 0
+			#for X, y in data_iter:
+			#	acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
+			#	n += y.shape[0]
+			#return acc_sum / n
+		
+			#acc_sum, n = 0.0, 0
+			#for X, y in data_iter:
+			#	if isinstance(net, torch.nn.Module):
+			#		net.eval() # 评估模式, 这会关闭dropout
+			#		acc_sum += (net(X).argmax(dim=1) == y).float().sum().item()
+			#		net.train() # 改回训练模式
+			#	else: # 自定义的模型
+			#		if('is_training' in net.__code__.co_varnames): # 如果有is_training这个参数
+			#			# 将is_training设置成False
+			#			acc_sum += (net(X, is_training=False).argmax(dim=1) == y).float().sum().item() 
+			#		else:
+			#			acc_sum += (net(X).argmax(dim=1) == y).float().sum().item() 
+			#	n += y.shape[0]
+			#return acc_sum / n
+
+			# 改用GPU来加速计算，完事后data_iter中的数据留在GPU，计算结果在CPU
+			if device is None and isinstance(net, torch.nn.Module):
+				# 如果没指定device就使用net的device
+				device = list(net.parameters())[0].device
+			acc_sum, n = 0.0, 0
+			with torch.no_grad():
+				for X, y in data_iter:
+					if isinstance(net, torch.nn.Module):
+						net.eval() # 评估模式, 这会关闭dropout
+						acc_sum += (net(X.to(device)).argmax(dim=1) == y.to(device)).float().sum().cpu().item()
+						net.train() # 改回训练模式
+					else: # 自定义的模型, 3.13节之后不会用到, 不考虑GPU
+						if('is_training' in net.__code__.co_varnames): # 如果有is_training这个参数
+							# 将is_training设置成False
+							acc_sum += (net(X, is_training=False).argmax(dim=1) == y).float().sum().item() 
+						else:
+							acc_sum += (net(X).argmax(dim=1) == y).float().sum().item() 
+					n += y.shape[0]
+			return acc_sum / n
+
+		def train_ch3(net, train_iter, test_iter, loss, num_epochs, batch_size,
+					params=None, lr=None, optimizer=None):
+			'''
+			loss 损失函数对象
+			params 待学习的参数Tensor对象的list
+			optimizer 优化算法对象
+			'''
+			for epoch in range(num_epochs):
+				train_l_sum, train_acc_sum, n = 0.0, 0.0, 0
+				for X, y in train_iter:
+					y_hat = net(X)
+					l = loss(y_hat, y).sum()
+
+					# 梯度清零
+					if optimizer is not None:
+						optimizer.zero_grad()
+					elif params is not None and params[0].grad is not None:
+						for param in params:
+							param.grad.data.zero_()
+
+					l.backward()
+					if optimizer is None:
+						d2l.sgd(params, lr, batch_size)
+					else:
+						optimizer.step()  # “softmax回归的简洁实现”一节将用到
+
+
+					train_l_sum += l.item()
+					train_acc_sum += (y_hat.argmax(dim=1) == y).sum().item()
+					n += y.shape[0]
+				test_acc = evaluate_accuracy(test_iter, net)
+				print('epoch %d, loss %.4f, train acc %.3f, test acc %.3f'
+					% (epoch + 1, train_l_sum / n, train_acc_sum / n, test_acc))
+
+		class FlattenLayer(nn.Module):
+			'''
+			摊平一个样本的维度，用一个行向量表示一个样本
+			用法：函数对象
+			'''
+			def __init__(self):
+				super(FlattenLayer, self).__init__()
+			def forward(self, x): # x shape: (batch, *, *, ...)
+				return x.view(x.shape[0], -1)
+		
+		def semilogy(x_vals, y_vals, x_label, y_label, x2_vals=None, y2_vals=None,
+					legend=None, figsize=(3.5, 2.5)):
+			'''
+			作图，y轴使用对数尺度
+			'''
+			d2l.set_figsize(figsize)
+			d2l.plt.xlabel(x_label)
+			d2l.plt.ylabel(y_label)
+			d2l.plt.semilogy(x_vals, y_vals)
+			if x2_vals and y2_vals:
+				d2l.plt.semilogy(x2_vals, y2_vals, linestyle=':')
+				d2l.plt.legend(legend)
+		
+		def corr2d(X, K):  
+			'''
+			二维互相关运算，用于替代矩阵卷积。
+			卷积本来要求将核矩阵上下翻转、左右翻转然后才进行互相关运算，
+			但深度学习中卷积核都是“学”出来的，“学”出来的卷积核又得翻转后再互相关运算，
+			那不如直接“学”互相关运算所用的核矩阵。
+			因此本书直接用互相关运算所用的核矩阵替代原本定义的卷积核。
+			'''
+			h, w = K.shape
+			Y = torch.zeros((X.shape[0] - h + 1, X.shape[1] - w + 1))
+			for i in range(Y.shape[0]):
+				for j in range(Y.shape[1]):
+					Y[i, j] = (X[i: i + h, j: j + w] * K).sum()
+			return Y
+		
+		def train_ch5(net, train_iter, test_iter, batch_size, optimizer, device, num_epochs):
+			# 使用GPU加速，完事后train_iter、test_iter留在device上
+			net = net.to(device)
+			print("training on ", device)
+			loss = torch.nn.CrossEntropyLoss()
+			for epoch in range(num_epochs):
+				train_l_sum, train_acc_sum, n, batch_count, start = 0.0, 0.0, 0, 0, time.time()
+				for X, y in train_iter:
+					X = X.to(device)
+					y = y.to(device)
+					y_hat = net(X)
+					l = loss(y_hat, y)
+					optimizer.zero_grad()
+					l.backward()
+					optimizer.step()
+					train_l_sum += l.cpu().item()
+					train_acc_sum += (y_hat.argmax(dim=1) == y).sum().cpu().item()
+					n += y.shape[0]
+					batch_count += 1
+				test_acc = evaluate_accuracy(test_iter, net)
+				print('epoch %d, loss %.4f, train acc %.3f, test acc %.3f, time %.1f sec'
+					% (epoch + 1, train_l_sum / batch_count, train_acc_sum / n, test_acc, time.time() - start))
+		
+		class Residual(nn.Module): 
+			'''ResNet'''
+
+			def __init__(self, in_channels, out_channels, use_1x1conv=False, stride=1):
+				super(Residual, self).__init__()
+				self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, stride=stride)
+				self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+				if use_1x1conv:
+					self.conv3 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride)
+				else:
+					self.conv3 = None
+				self.bn1 = nn.BatchNorm2d(out_channels)
+				self.bn2 = nn.BatchNorm2d(out_channels)
+
+			def forward(self, X):
+				Y = F.relu(self.bn1(self.conv1(X)))
+				Y = self.bn2(self.conv2(Y))
+				if self.conv3:
+					X = self.conv3(X)
+				return F.relu(Y + X)
+		
+		class GlobalAvgPool2d(nn.Module): #全局平均池化层
+			# 通过将池化窗口形状设置成输入的高和宽实现
+			def __init__(self):
+				super(GlobalAvgPool2d, self).__init__()
+			def forward(self, x):
+				return F.avg_pool2d(x, kernel_size=x.size()[2:])
+		
+		def load_data_jay_lyrics():
+			'''
+			加载数据集：周杰伦的歌词
+			返回：
+				按顺序将各字符（包括空格）替换为对应的索引号后的list
+				键为字符、值为索引号的dict
+				按索引号顺序排列的各字符的list
+				实际用到的字符数，即dict的键的个数
+			原文略；可直接从GitHub下载
+			'''
+			return corpus_indices, char_to_idx, idx_to_char, vocab_size
+
+		def data_iter_random(corpus_indices, batch_size, num_steps, device=None):
+			'''
+			每个样本是原始序列上任意截取的一段序列。
+			相邻的两个随机小批量在原始序列上的位置不一定相毗邻。
+			无法用一个小批量最终时间步的隐藏状态来初始化下一个小批量的隐藏状态。
+			在训练模型时，每次随机采样前都需要重新初始化隐藏状态。
+			返回：
+				小批量样本的输入向量
+				小批量样本的标签向量
+			'''
+
+			# 减1是因为输出的索引x是相应输入的索引y加1
+			num_examples = (len(corpus_indices) - 1) // num_steps
+			epoch_size = num_examples // batch_size
+			example_indices = list(range(num_examples))
+			random.shuffle(example_indices)
+
+			# 返回从pos开始的长为num_steps的序列
+			def _data(pos):
+				return corpus_indices[pos: pos + num_steps]
+			if device is None:
+				device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+			for i in range(epoch_size):
+				# 每次读取batch_size个随机样本
+				i = i * batch_size
+				batch_indices = example_indices[i: i + batch_size]
+				X = [_data(j * num_steps) for j in batch_indices]
+				Y = [_data(j * num_steps + 1) for j in batch_indices]
+				yield torch.tensor(X, dtype=torch.float32, device=device), torch.tensor(Y, dtype=torch.float32, device=device)
+		
+		def data_iter_consecutive(corpus_indices, batch_size, num_steps, device=None):
+			'''
+			相邻的两个随机小批量在原始序列上的位置相毗邻。
+			只需在每一个迭代周期开始时初始化隐藏状态。
+			同一迭代周期中，随着迭代次数的增加，梯度的计算开销会越来越大。
+			为了使模型参数的梯度计算只依赖一次迭代读取的小批量序列，
+			需在每次读取小批量前将隐藏状态从计算图中分离出来。
+			返回：
+				小批量样本的输入向量
+				小批量样本的标签向量
+			'''
+
+			if device is None:
+				device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+			corpus_indices = torch.tensor(corpus_indices, dtype=torch.float32, device=device)
+			data_len = len(corpus_indices)
+			batch_len = data_len // batch_size
+			indices = corpus_indices[0: batch_size*batch_len].view(batch_size, batch_len)
+			epoch_size = (batch_len - 1) // num_steps
+			for i in range(epoch_size):
+				i = i * num_steps
+				X = indices[:, i: i + num_steps]
+				Y = indices[:, i + 1: i + num_steps + 1]
+				yield X, Y
+		
+		def to_onehot(X, n_class):  
+			# X shape: (batch, seq_len), output: seq_len elements of (batch, n_class)
+			return [one_hot(X[:, i], n_class) for i in range(X.shape[1])]
+		
+		def predict_rnn(prefix, num_chars, rnn, params, init_rnn_state,
+						num_hiddens, vocab_size, device, idx_to_char, char_to_idx):
+			'''
+			基于前缀prefix（含有数个字符的字符串）来预测接下来的num_chars个字符。
+			rnn(inputs, state, params) 循环神经网络，函数对象，
+				inputs和outputs皆为num_steps个形状为(batch_size, vocab_size)的矩阵
+			params 隐藏层、输出层等层的全部参数
+			init_rnn_state(batch_size, num_hiddens, device)
+				返回一个tuple，元素是形状为(批量大小, 隐藏单元个数)、值为0的Tensor。
+				使用元组是为了更便于处理隐藏状态含有多个Tensor的情况。
+			'''
+			state = init_rnn_state(1, num_hiddens, device)
+			output = [char_to_idx[prefix[0]]]
+			for t in range(num_chars + len(prefix) - 1):
+				# 将上一时间步的输出作为当前时间步的输入
+				X = to_onehot(torch.tensor([[output[-1]]], device=device), vocab_size)
+				# 计算输出和更新隐藏状态
+				(Y, state) = rnn(X, state, params)
+				# 下一个时间步的输入是prefix里的字符或者当前的最佳预测字符
+				if t < len(prefix) - 1:
+					output.append(char_to_idx[prefix[t + 1]])
+				else:
+					output.append(int(Y[0].argmax(dim=1).item()))
+			return ''.join([idx_to_char[i] for i in output])
+		
+		def grad_clipping(params, theta, device): #裁剪梯度
+			norm = torch.tensor([0.0], device=device)
+			for param in params:
+				norm += (param.grad.data ** 2).sum()
+			norm = norm.sqrt().item()
+			if norm > theta:
+				for param in params:
+					param.grad.data *= (theta / norm)
+		
+		def train_and_predict_rnn(rnn, get_params, init_rnn_state, num_hiddens,
+								vocab_size, device, corpus_indices, idx_to_char,
+								char_to_idx, is_random_iter, num_epochs, num_steps,
+								lr, clipping_theta, batch_size, pred_period,
+								pred_len, prefixes):
+			'''
+			这里的模型训练函数有以下特点：
+				使用困惑度评价模型。
+				在迭代模型参数前裁剪梯度。
+				对时序数据采用不同采样方法将导致隐藏状态初始化的不同。相关讨论可参考6.3节（语言模型数据集（周杰伦专辑歌词））。
+			rnn(inputs, state, params) 循环神经网络，函数对象，
+				inputs和outputs皆为num_steps个形状为(batch_size, vocab_size)的矩阵
+			get_params() 返回隐藏层、输出层等层的全部参数
+			init_rnn_state(batch_size, num_hiddens, device)
+				返回一个tuple，元素是形状为(批量大小, 隐藏单元个数)、值为0的Tensor。
+				使用元组是为了更便于处理隐藏状态含有多个Tensor的情况。
+			corpus_indices 按顺序将各字符（包括空格）替换为对应的索引号后的list
+			is_random_iter 要不要随机截取序列
+			pred_period 每逢多少个epoch才用当前的模型预测一次
+			pred_len 一次预测多少个字符
+			prefixes 预测用的前缀
+			'''
+			if is_random_iter:
+				data_iter_fn = d2l.data_iter_random
+			else:
+				data_iter_fn = d2l.data_iter_consecutive
+			params = get_params()
+			loss = nn.CrossEntropyLoss()
+
+			for epoch in range(num_epochs):
+				if not is_random_iter:  # 如使用相邻采样，在epoch开始时初始化隐藏状态
+					state = init_rnn_state(batch_size, num_hiddens, device)
+				l_sum, n, start = 0.0, 0, time.time()
+				data_iter = data_iter_fn(corpus_indices, batch_size, num_steps, device)
+				for X, Y in data_iter:
+					if is_random_iter:  # 如使用随机采样，在每个小批量更新前初始化隐藏状态
+						state = init_rnn_state(batch_size, num_hiddens, device)
+					else:  
+					# 否则需要使用detach函数从计算图分离隐藏状态, 这是为了
+					# 使模型参数的梯度计算只依赖一次迭代读取的小批量序列(防止梯度计算开销太大)
+						for s in state:
+							s.detach_()
+
+					inputs = to_onehot(X, vocab_size)
+					# outputs有num_steps个形状为(batch_size, vocab_size)的矩阵
+					(outputs, state) = rnn(inputs, state, params)
+					# 拼接之后形状为(num_steps * batch_size, vocab_size)
+					outputs = torch.cat(outputs, dim=0)
+					# Y的形状是(batch_size, num_steps)，转置后再变成长度为
+					# batch * num_steps 的向量，这样跟输出的行一一对应
+					y = torch.transpose(Y, 0, 1).contiguous().view(-1)
+					# 使用交叉熵损失计算平均分类误差
+					l = loss(outputs, y.long())
+
+					# 梯度清0
+					if params[0].grad is not None:
+						for param in params:
+							param.grad.data.zero_()
+					l.backward()
+					grad_clipping(params, clipping_theta, device)  # 裁剪梯度
+					d2l.sgd(params, lr, 1)  # 因为误差已经取过均值，梯度不用再做平均
+					l_sum += l.item() * y.shape[0]
+					n += y.shape[0]
+
+				if (epoch + 1) % pred_period == 0:
+					print('epoch %d, perplexity %f, time %.2f sec' % (
+						epoch + 1, math.exp(l_sum / n), time.time() - start))
+					for prefix in prefixes:
+						print(' -', predict_rnn(prefix, pred_len, rnn, params, init_rnn_state,
+							num_hiddens, vocab_size, device, idx_to_char, char_to_idx))
+		”
